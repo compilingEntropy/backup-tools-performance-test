@@ -1,32 +1,45 @@
 #!/bin/bash
 
 # Author: Aurelio Santos - aurhes@gmail.com
+# Modified by: compilingEntropy - compilingEntropy@gmail.com
+# 
+# HashBackup build #1330
+# rdiff-backup 1.2.8
+# obnam 1.9
+# Attic 0.16
+# Borg 0.23.0
 #
 # Usage:
 #     ./backup_tools_test.sh N    - Execute only one test. N indicates the number of the test
 #     ./backup_tools_test.sh      - Execute all tests
 #
-# Client requirements: ssh, dstat, rsync, rdiff-backup, duplicity, areca and link-backup
-# Server requirements: sshd
+# Client requirements: ssh, openssl, dstat, rsync, rdiff-backup, rsyncrypto, gnupg, obnam, hashbackup, attic, borg
 #
 # Tests:
-#              compress encrypt
-# rsync     0
-# rdiff-b.  1
-# rdiff-b.  2      x
-# duplicity 3      x
-# duplicity 4      x       x
-# areca     5
-# areca     6      x
-# areca     7      x       x
-# linkb     8
+#                 compress encrypt
+# rsync        0
+# rsync        1      x
+# rdiff-b.     2
+# rdiff-b.     3      x
+# rdiff-b.     4      x       x
+# obnam        5
+# obnam        6      x
+# obnam        7      x       x
+# hashbackup   8      x       x
+# attic        9      x
+# attic        10     x       x
+# borg         11     x
+# borg         12     x       x
 #
-# Test groups: [0,1,5,8],[2,3,6],[4,7]
+# Test groups: [0,2,5],[1,3,6,9,11],[4,7,8,10,12]
+
+PWD="$(pwd)"
 
 SOURCE="source"
 DESTINATION="backup"
-HOST="<server_ip>"
-USER="<username>"
+TMP="<tmp>"
+#HOST="<server_ip>"
+#USER="<username>"
 LOG_FILE="log"`date +%Y%m%d%H%M%S`".txt"
 
 FILE_SIZE=215
@@ -35,42 +48,102 @@ MAX_SUB_DIRS=10
 MAX_LEVELS_SUB_DIRS=10
 
 # rsync
-b[0]="rsync -a -e ssh $SOURCE $USER@$HOST:$DESTINATION/"
-r[0]="rsync -a -e ssh $USER@$HOST:$DESTINATION/ $SOURCE"
+b[0]="rsync -a $SOURCE $DESTINATION/"
+r[0]="rsync -a $DESTINATION/ $SOURCE"
+
+b[1]="rsync -az $SOURCE $DESTINATION/"
+r[1]="rsync -az $DESTINATION/ $SOURCE"
 
 # rdiff-backup
-b[1]="rdiff-backup --no-compression $SOURCE $USER@$HOST::$DESTINATION/"
-r[1]="rdiff-backup -r now --no-compression $USER@$HOST::$DESTINATION/ $SOURCE"
+b[2]="rdiff-backup --no-compression $SOURCE $DESTINATION/"
+r[2]="rdiff-backup -r now --no-compression $DESTINATION/ $SOURCE"
 
-b[2]="rdiff-backup $SOURCE $USER@$HOST::$DESTINATION/"
-r[2]="rdiff-backup -r now $USER@$HOST::$DESTINATION/ $SOURCE"
+b3()
+{
+	mkdir -p $TMP/
+	rsync -Paq -f"+ */" -f"- *" $SOURCE/ $TMP/
+	cd $SOURCE
+	find ./ -type f -print0 | parallel -0 -I{} "gzip -c -6 --rsyncable {} > $TMP/{}"
 
-# duplicity
-b[3]="duplicity --no-encryption $SOURCE ssh://$USER@$HOST/$DESTINATION/"
-r[3]="duplicity --no-encryption ssh://$USER@$HOST/$DESTINATION/ $SOURCE" 
+	rdiff-backup --no-compression $TMP/ $DESTINATION/
+	rm -rf $TMP/
+	cd $PWD
+}
 
-export PASSPHRASE=""
-KEY="<key>"
-b[4]="duplicity --encrypt-key $KEY $SOURCE ssh://$USER@$HOST/$DESTINATION/"
-r[4]="duplicity --encrypt-key $KEY ssh://$USER@$HOST/$DESTINATION/ $SOURCE"
+r3()
+{
+	mkdir -p $TMP/
+	rdiff-backup --no-compression -r now $DESTINATION/ $TMP/
 
-# areca
-ARECA_CONFIG_FILE="<path_to_areca_configuration_file>"
-ARECA_CONFIG_FILE_COMPRESSION="<path_to_areca_configuration_file>"
-ARECA_CONFIG_FILE_COMPRESSION_ENCRYPTION="<path_to_areca_configuration_file>"
+	rsync -Paq -f"+ */" -f"- *" $TMP/ $SOURCE/
+	cd $TMP/
+	find ./ -type f -print0 | parallel -0 -I{} "zcat {} > $SOURCE/{}"
+	rm -rf $TMP/
+	cd $PWD
+}
 
-b[5]="areca_cl backup -config $ARECA_CONFIG_FILE"
-r[5]="areca_cl recover -destination $SOURCE -config $ARECA_CONFIG_FILE"
+b[3]="b3"
+r[3]="r3"
 
-b[6]="areca_cl backup -config $ARECA_CONFIG_FILE_COMPRESSION"
-r[6]="areca_cl recover -destination $SOURCE -config $ARECA_CONFIG_FILE_COMPRESSION"
+PUBKEY="<public-key>"
+b4()
+{
+	mkdir -p $TMP/2/
+	rsyncrypto -r $SOURCE $TMP/2/ $TMP/1/ $PUBKEY -b 256
 
-b[7]="areca_cl backup -config $ARECA_CONFIG_FILE_COMPRESSION_ENCRYPTION"
-r[7]="areca_cl recover -destination $SOURCE -config $ARECA_CONFIG_FILE_COMPRESSION_ENCRYPTION"
+	rdiff-backup --no-compression $TMP/2/ $DESTINATION/
+	rm -rf $TMP/
+}
 
-# link-backup
-b[8]="lb $SOURCE $USER@$HOST:$DESTINATION"
-r[8]="lb $USER@$HOST:$DESTINATION $SOURCE"
+PRIVKEY="<private-key>"
+r4()
+{
+	mkdir -p $TMP/2/
+	rdiff-backup -r now --no-compression $DESTINATION/ $TMP/2/
+	
+	rsyncrypto -rd $TMP/2/ $SOURCE $TMP/1/ $PRIVKEY
+	rm -rf $TMP/
+}
+
+b[4]="b4"
+r[4]="r4"
+
+# obnam
+b[5]="obnam backup --repository $DESTINATION/ $SOURCE"
+r[5]="obnam restore --repository $DESTINATION/ --to $SOURCE"
+
+b[6]="obnam backup --compress-with=deflate --repository $DESTINATION/ $SOURCE"
+r[6]="obnam restore --repository $DESTINATION/ --to $SOURCE"
+
+GPGFINGERPRINT="<fingerprint>"
+b[7]="obnam backup --compress-with=deflate --encrypt-with=$GPGFINGERPRINT --repository $DESTINATION/ $SOURCE"
+r[7]="obnam restore --repository $DESTINATION/ --to $SOURCE"
+
+# hashbackup
+b[8]="hb init -c $DESTINATION/; hb backup -c $DESTINATION/ -D 400m -Z 6 $SOURCE"
+r[8]="cd $SOURCE; hb get -c $DESTINATION/ /; cd $PWD"
+
+# attic
+export ATTIC_PASSPHRASE="<passphrase>"
+i=1
+b[9]="attic init $DESTINATION/attic; attic create -s $DESTINATION/attic::$((i++)) $SOURCE"
+r[9]="cd $SOURCE; attic extract $DESTINATION/attic::$((i-1)); cd $PWD"
+
+i=1
+b[10]="attic init -e passphrase $DESTINATION/attic; attic create -s $DESTINATION/attic::$((i++)) $SOURCE"
+r[10]="cd $SOURCE; attic extract $DESTINATION/attic::$((i-1)); cd $PWD"
+
+# borg
+i=1
+b[11]="borg init $DESTINATION/borg; borg create -s $DESTINATION/borg::$((i++)) $SOURCE"
+r[11]="cd $SOURCE; borg extract $DESTINATION/borg::$((i-1)); cd $PWD"
+
+export BORG_PASSPHRASE="<passphrase>"
+i=1
+b[12]="borg init -e passphrase $DESTINATION/borg; borg create -s $DESTINATION/borg::$((i++)) $SOURCE"
+r[12]="cd $SOURCE; borg extract $DESTINATION/borg::$((i-1)); cd $PWD"
+
+#######################################################################
 
 # remove files that can conflict with the new ones
 if [ $# == 1 ]; then
@@ -102,13 +175,13 @@ for (( i=$BEGIN; i<=$END; i++ ))
 do
 	rm -r $SOURCE; mkdir $SOURCE
 	cp -r $SOURCE"_tmp"/* $SOURCE/
-	ssh $HOST "rm -r $DESTINATION; mkdir $DESTINATION"
+	rm -r $DESTINATION; mkdir $DESTINATION
 
 	# full backup
 	echo Backup $i: ${b[$i]}
 	echo Backup $i: ${b[$i]} >> $LOG_FILE
 
-	ssh $HOST "sync"
+	sync
 	dstat -Tcmnd --output "dstat"$i"_b.csv" & PID=$!; sleep 5
 	TIME=$(date +%s)
 
@@ -118,7 +191,7 @@ do
 	sleep 5; kill $PID
 
 	echo Time: $TIME >> $LOG_FILE
-	echo Space: $(ssh $HOST "du -s "$DESTINATION" | cut -f1") >> $LOG_FILE
+	echo Space: $(du -s "$DESTINATION" | cut -f1) >> $LOG_FILE
 
 	# modify files
 	for (( j=0; j<$NUM_FILES; j=j+10 ))
@@ -141,7 +214,7 @@ do
 	echo Increment $i: ${b[$i]}
 	echo Increment $i: ${b[$i]} >> $LOG_FILE
 
-	ssh $HOST "sync"
+	sync
 	dstat -Tcmnd --output "dstat"$i"_i.csv" & PID=$!; sleep 5
 	TIME=$(date +%s)
 
@@ -151,7 +224,7 @@ do
 	sleep 5; kill $PID
 
 	echo Time: $TIME >> $LOG_FILE
-	echo Space: $(ssh $HOST "du -s "$DESTINATION" | cut -f1") >> $LOG_FILE
+	echo Space: $(du -s "$DESTINATION" | cut -f1) >> $LOG_FILE
 
 	rm -r $SOURCE
 
@@ -159,7 +232,7 @@ do
 	echo Restore $i: ${r[$i]}
 	echo Restore $i: ${r[$i]} >> $LOG_FILE
 
-	ssh $HOST "sync"
+	sync
 	dstat -Tcmnd --output "dstat"$i"_r.csv" & PID=$!; sleep 5
 	TIME=$(date +%s)
 
